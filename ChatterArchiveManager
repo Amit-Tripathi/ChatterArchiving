@@ -1,0 +1,1369 @@
+// 
+// (c) 2009 Appirio, Inc.
+//
+// Zantaz Phase2 ChatterArchiveManager
+// 
+//
+// 5/25/2011     Parth Tamhaney       Original
+// 06/10/2011    Parth Tamhaney       Changes to include UserStatus type to in retrieving existing feed (line 145)
+//                                    Add if clause to get document info, only if its content post  (line 583)
+// 06/14/2011    Parth Tamhaney       Fixed a bug related to ContentDocumentId not being set correctly
+//                                      Changed arguments in iArchiveBuilder.setContentDocumentFields() to (Sobject rdmFeed ,RFC2822_Archive__c rfc2822Arch, Map<string,ContentDocumentLink> mapContentLinks,string hostURL);
+//                                       Updated method  getContentDetails() to return the ContentDocumentLink object instead of a map
+// 07/06/2011   Dan - Updated the separator in the "To" field from a comma to a semicolon.  
+// 07/12/2011   Parth                 Set  Archive_Status__c = STATUS_READY when a  RFC Archive Record is updated
+//                                    Methods updated:  update_RFC2822_Archive_For_Posts( Ln#: 504), update_RFC2822_Archive_For_Comments(Ln#: 742)
+//07/12/2011    Parth                 Set feed id on RFC Archive 
+//                                     Method create_RFC2822_Archive() line# 609
+//                                    Changed return type of  iArchiveBuilder.getExistingRFC2822_Archives() from   List<RFC2822_Archive__c> to Map<String,RFC2822_Archive__c>
+//07/20/2011    Parth                 Updated Feed Selection query as per v22.
+//                                    Removed use of FeedPost and ContentDocumentLink.      
+//                                    Removed use of  Map<string,ContentDocumentLink> mapContentLinks                    
+//07/26/2011    Parth                 Added future method  public static void ArchiveFeedTracking_future() to Archive Tracked Changes feed
+//                                    Also added methods    getParentSobjectFields() to get the Field metadata
+//                                    Updated Method getChatterPostDiv() to add details of the fields updated
+//08/03/2011    Parth               Updated with ZantazPhase3 Code
+//09/22/2011    Manisha Gupta       Removed ContentData from feed query (ln# 137)
+//11/15/2011    Manisha Gupta       changed rfc archive body for campaign. line (line 100,239-256,856-857)
+//11/18/2011    Manisha Gupta       changed rfc archive body for campaign summary(line 257-260)
+//                                  added a new field Campaign Summary in query.(line 245 )
+//12/15/2011 :  Manisha Gupta :     Test Failure fix Line 183        
+//17 Feb 2012 RA: Zantaz File Enhancement
+//10 April 2013 Dinesh Moundekar    CRMGPS-3827: Inserted code in initialize_RFC2822_Archive() to capture group Name(Line No 778, 779, 780).
+//22 Aug 2013:  Aditya Talwar:  QC - 1870 Chatter Archival: Group name is not displaying in the outlook email box after local java agent is run for chatter post and comments
+//05 Sep 2013:  Dinesh M:   CRMGPS-4275:  Zantaz Implementation - two things missing 
+//25 Feb 2014:  Dinesh M:   QC2448, Zantaz-Chatter: Files uploaded in comment section, deleted from comment section do not have the group name associated in outlook mail box
+//Jira 4350 : Vipin Makhija : Methods added to create Archieve records for file version change and File deletion as part of ChatterArchiveManager_Batch bach decommisioning
+//// VM : QC 2890 changed getChatterPostDiv method to get to fetch the correct file name , replaced contentfilename with title                                  
+public without sharing class ChatterArchiveManager {      
+  public interface iArchiveBuilder { 
+    // Method returns list of Parent Fields
+    String getParentFields();
+     /*
+      * This method returns the div tag for primaryMaterial
+      */
+     String getHTMLPrimaryMaterialDivTag(sObject parent); 
+     
+      /*
+       * This method creates and returns the Subject for the Archive
+       */
+     String getArchiveSubject(sObject parent,sObject createdBy);
+     
+     /**
+      * This method return the From field for Chatter Archive
+      *
+      **/  
+     String getFromAddress(sObject parent, sObject createdBy );
+     
+     /**
+      * This method return the To fields for the RFC Archive
+      *
+      **/  
+      String getToAddress(sObject parent, sObject createdBy );
+     
+     /**
+      * This method returns the List of existing RFC Archives by matching the source ids 
+      * For General Chatter the Source id is matched with the Post Id
+      * For RDM Chatter the Source id is the RDM id
+      *
+      **/  
+      List<RFC2822_Archive__c>getExistingRFC2822_Archives(Set<String> parentIds , sObject createdBy);
+     
+     /**
+      * This method return the Source Id for Chatter Archive
+      *
+      **/       
+      string getSourceID(sObject rdmFeed);
+      
+       /**
+       * This Method returns the list of Parent Ids 
+       * Parent Ids can be the Post Ids or the Object Ids for which the Chatter is happening
+       *
+       */ 
+       Set<String> getParentIds(Set<String> parentIds, Set<String> parentPostIds) ;
+     
+        /**
+         * Creates the To Address for the Post
+         */
+        String getFirstToAddressForPost(string strFrom,  sObject createdBy,sObject parent  );
+        
+        /**
+        * This method gets the Existing RFC archive 
+        */
+         RFC2822_Archive__c getExistingArchive( Map<String,RFC2822_Archive__c> mapRFC2822_Archive, string parentId, string feedItemId);
+         
+          /**
+          * This Method Fills the Content data in the RFC Archive 
+          *
+          */
+          RFC2822_Archive__c setContentDocumentFields(Sobject rdmFeed ,RFC2822_Archive__c rfc2822Arch,string hostURL);
+          
+          RFC2822_Archive__c  setRFCArchiveDocumentFields(RFC2822_Archive__c rfc2822Arch,string filename ,Id contentDocumentId,string hostURL,string mimeType);
+         
+  }
+  // END INTERFACE
+    public static String STATUS_READY = 'Ready';
+    
+    public ChatterArchiveManager.iArchiveBuilder archiveBuilder;
+    // 11/15/2011 Manisha Gupta : addded to add campaign details in archive body.
+    public static String objId ;
+    public static String oldDesc ;
+    public static String newDesc ;
+    public static String oldSumm;
+    public static String newSumm;
+    public static boolean st_forInsert = false;
+    
+        
+    public  ChatterArchiveManager(ChatterArchiveManager.iArchiveBuilder builder){
+        archiveBuilder = builder;
+     
+    }
+   public static String MESSAGE_HOST_ADDRESS = getHostIP();// '@cs3.salesforce.com';
+   public static string getHostURL(){  //https://cs3.salesforce.com
+        return URL.getSalesforceBaseUrl().toExternalForm();
+   } 
+   public static string getHostIP(){   //  @cs3.salesforce.com
+        return  '@' + URL.getSalesforceBaseUrl().toExternalForm().split('//')[1] ; 
+   }
+   //This method encodes stringto Base 64
+   public static string base64Encode(string strData){
+        if(strData==null){
+            return '';        
+         }
+        //return EncodingUtil.base64Encode(Blob.valueOf(EncodingUtil.urlEncode( strData,'UTF-8')));
+        //Just base64Encode. No need to do URLEncode here.
+        return EncodingUtil.base64Encode(Blob.valueOf(strData)); 
+    }
+    //This method encodes the RFC2822_Archive__c Body_Plain_Text__c and sets it into Body__c
+    public static void  EncodeData(RFC2822_Archive__c rfc2822Arch){
+        rfc2822Arch.Body__c = rfc2822Arch.Body_Plain_Text__c;
+        if(rfc2822Arch.Content_Transfer_Encoding__c == 'base64'  ){
+            rfc2822Arch.Body__c = base64Encode(rfc2822Arch.Body_Plain_Text__c);
+        }
+    }
+     // Method returns the Object name of the Feed object for any object
+    public static string getFeedSobjectName(string ParentSobjectName){
+        if(ParentSobjectName.endsWith('__c')){
+            return ParentSobjectName.substring(0,ParentSobjectName.length()-1) + 'Feed';// 'Research_Document_Metadata__Feed'
+        }else{
+            return ParentSobjectName+ 'Feed';// 'UserFeed'
+        }
+    }
+    public static string getFeedQuery(Set<Id> objectIds,string ParentSobjectName, boolean fromTriggerUpdate,ChatterArchiveManager.iArchiveBuilder archiveBuilder){
+        String feedObjectName = getFeedSobjectName(ParentSobjectName);
+        system.debug('_____feedObjectName: '+ feedObjectName+'___________ getFeeds_______ parentObjectIds-->'+ objectIds);
+        
+        string whereCaluse =  ' where Id in :objectIds   and CreatedById != null  ' ;
+        if(fromTriggerUpdate || (st_forInsert ==true)){
+            whereCaluse= ' where ParentId in :objectIds ';
+        }
+           String query ='SELECT Id, Type, CreatedBy.FirstName, CreatedBy.LastName, CreatedBy.Name,CreatedBy.email,  ' +
+                        ' Body, Title,CreatedDate,  ContentDescription, ContentFileName, LinkUrl, ContentSize, ContentType,RelatedRecordId,  ';
+                        query = query +  archiveBuilder.getParentFields() ; //getParentFields(ParentSobjectName) ;
+                  query = query + ' (SELECT Id, CommentBody, CreatedDate, CreatedById,CreatedBy.Name, CreatedBy.LastName, CreatedBy.FirstName,CreatedBy.email ' +
+                            
+                            ' ,CommentType, RelatedRecordId ' + // Added on 16 Feb 2012 RA: Zantaz File Enhancement
+                            
+                            ' FROM FeedComments ORDER BY CreatedDate Asc ),   ' +
+                            ' (Select Id, FeedItemId, FieldName, OldValue, NewValue From FeedTrackedChanges ) ' +
+                            ' FROM ' + feedObjectName + 
+                            whereCaluse + //' where Id in :feedItemIds   and CreatedById != null  ' +
+                            ' Order BY CreatedDate desc  ' ;
+                if(fromTriggerUpdate && (st_forInsert ==false)){
+                      query = query + ' Limit 1';
+                }
+         if(ParentSobjectName == 'ContentDocument'){
+            query = query.replace('Parent.Name,', '');
+       } 
+       return query;
+    }
+     /*
+      * This method takes the list of ids of feedItems and Parent Object name .
+      * Returns the list of feeds (List<Sobject>)
+      *
+      */
+    public static List<Sobject> getFeeds(Set<Id> objectIds,string ParentSobjectName, boolean fromTriggerUpdate,ChatterArchiveManager.iArchiveBuilder archiveBuilder){
+        string query = getFeedQuery(objectIds,ParentSobjectName,fromTriggerUpdate,archiveBuilder);
+        List<Sobject> feedSobjectList = new List<Sobject>();
+        feedSobjectList = Database.query(query);
+       
+        //Check if The operation is called from Update trigger and the feed is for Update 
+        if(fromTriggerUpdate && (st_forInsert ==false)){
+            system.debug('________________inside for update');
+            List<sObject> lstObj =Database.query('Select CreatedDate from ' + ParentSobjectName +' where id in :objectIds ' );
+             // 12/15/2011 : Manisha Gupta : Test Failure fix
+             if(lstObj != null && lstObj.size() > 0 && feedSobjectList.size() > 0 ) {
+                 if((((DateTime)feedSobjectList[0].get('CreatedDate')).getTime() - ((DateTime)lstObj[0].get('CreatedDate')).getTime())< 2000 ){
+                        return new List<Sobject>();
+                    }
+             }
+                   
+        }
+
+        return feedSobjectList;
+        
+    }
+     // This Method identifies the Sobject type from the parent Id and return the Sobject Name
+    public static string getParentSobjectTypeName(String feedParentItmId){
+        Map<String, String> keyPrefixMap = new Map<String, String>{};
+        Map<String,Schema.SObjectType> gd = Schema.getGlobalDescribe();
+        string ParentSobjectTypeName ='';
+        Set<String> keyPrefixSet = gd.keySet();
+        for(String sObj : keyPrefixSet){
+            Schema.DescribeSObjectResult r =  gd.get(sObj).getDescribe();
+            String tempName = r.getName();
+            String tempPrefix = r.getKeyPrefix();
+            if(tempPrefix<> null && feedParentItmId.startsWith(tempPrefix)){
+               ParentSobjectTypeName= tempName;
+                break;
+            }}
+        return ParentSobjectTypeName;
+    }
+    
+    public static  List<Schema.SObjectField> getSobjectFields(String sObjectName){
+        List<Schema.SObjectField> fields ;
+        Map<String, String> keyPrefixMap = new Map<String, String>{};
+        Map<String,Schema.SObjectType> gd = Schema.getGlobalDescribe();
+       Set<String> keyPrefixSet = gd.keySet();
+        for(String sObj : keyPrefixSet){
+            Schema.DescribeSObjectResult r =  gd.get(sObj).getDescribe();
+            String tempName = r.getName();
+            String tempPrefix = r.getKeyPrefix();
+            if(tempName == sObjectName){
+               fields = r.fields.getMap().values();
+                break;
+            }        }
+        return fields;    }
+        
+     public static  List<Schema.SObjectField> getParentSobjectFields(String feedParentItmId){
+        List<Schema.SObjectField> fields ;
+        Map<String, String> keyPrefixMap = new Map<String, String>{};
+        Map<String,Schema.SObjectType> gd = Schema.getGlobalDescribe();
+       Set<String> keyPrefixSet = gd.keySet();
+        for(String sObj : keyPrefixSet){
+            Schema.DescribeSObjectResult r =  gd.get(sObj).getDescribe();
+            String tempName = r.getName();
+            String tempPrefix = r.getKeyPrefix();
+            if(tempPrefix<> null && feedParentItmId.startsWith(tempPrefix)){
+               fields = r.fields.getMap().values();
+                break;
+            }        }
+        return fields;    }
+    // This Method returns the  Existing RFC2822_Archive__c 
+    private  RFC2822_Archive__c getExistingRFC2822_Archive(Id recordId ){
+        List<RFC2822_Archive__c> lstTodaysArchives  =[Select r.To__c, r.Subject__c, r.SourceID__c, r.Name, r.Message_ID__c, r.MIME_Version__c, r.Id, r.ContentDocumentTitle__c,r.ContentDocumentType__c,r.ContentDocumentName__c,r.From__c, r.Content_Type__c, r.Content_Transfer_Encoding__c, r.Body__c, r.Body_Plain_Text__c, r.Archive_Date__c,Index__c From RFC2822_Archive__c r where id = :recordId limit 1];
+        return lstTodaysArchives[0];
+   }
+      // This method returns the style tag
+      public static  string getHTMLStyleTag(){
+           return   '<style type="text/css">\n' + '  div {padding-left:10px; padding-bottom:5px;}\n' + '  span {padding-right:5px;}\n' + '  .deleted {font-weight:bold;}\n' + '</style>\n';
+       } 
+       // This method returns the div tag for message id
+        public static   string getHTMLMessageDivTag(string SourceId){
+            return  '  <div id="sourceID">Source Record ID: '+ SourceId + '</div>\n' ;
+       }
+      // This method returns the div tag for a Chatter Post 
+      public static  string getChatterPostDiv(sObject rdmFeed, string DeleteInfo, string ParentSobjectName,RFC2822_Archive__c rfc2822Arch){
+        
+        system.debug('InsideThis***');
+        sObject createdBy = rdmFeed.getSObject('CreatedBy');
+        string body = '';
+        /*string divBody ='   <div id="' + rdmFeed.get('id') + '" class="chatterPost"> \n' + DeleteInfo + rdmFeed.get('CreatedDate') +' ' +  createdBy.get('Name') + ' - @body@\n' + '   &nbsp;</div>\n' ;
+        if(rdmFeed.get('Body')<> null){
+            body = (string)rdmFeed.get('Body') + '\n'  ;            
+        }*/
+        
+        string divBody ='   <div id="' + rdmFeed.get('id') + '" class="chatterPost"> \n' + DeleteInfo + rdmFeed.get('CreatedDate') +' '+  createdBy.get('Name') ;
+        
+        //5 Sep 2013:     Dinesh M:   CRMGPS-4275:Added below 7 Line of code.
+        String feedObjectName = rdmFeed.getSObjectType().getDescribe().getName();
+            if(feedObjectName.equalsIgnoreCase('UserFeed')){  
+          if((string)rdmFeed.get('parentId') != UserInfo.getUserId()){   
+            string toUserName = String.ValueOf(rdmFeed.getSObject('Parent').get('Name'));
+            divBody  += ' To '+toUserName;         
+          }      
+        }
+        
+        divBody += ' - @body@\n' + '   &nbsp;</div>\n' ;
+        if(rdmFeed.get('Body')<> null){
+            body = (string)rdmFeed.get('Body') + '\n'  ;            
+        }
+        
+       if(rdmFeed.get('Type') == 'TrackedChange'){
+          
+           body = ChatterArchiveManager.getFeedPostBody( rdmFeed,  DeleteInfo,  ParentSobjectName, rfc2822Arch);  
+                    
+       }else if(rdmFeed.get('Type') == 'LinkPost'){
+            body += createdBy.get('Name') + ' posted a link\n ';
+            body +=(string)rdmFeed.get('Title')+ ' \n ';
+            body += (string)rdmFeed.get('LinkUrl') + '\n' ;
+        }else if(rdmFeed.get('Type') == 'ContentPost'){
+            body += createdBy.get('Name') + ' posted a file\n ';
+            body +=(string)rdmFeed.get('title')+ ' \n '; // VM : QC 2890 changed from contentfilename to Title to fetch the correct file name
+        }
+             
+        divBody =  divBody.replace('@body@',body)   ;
+        divBody = divBody.replace('null','');
+        return divBody;
+       }
+       
+      public static Map<string,string>  getParentObjectFieldMap(sObject rdmFeed){
+            Map<string,string> mapFieldAPI_Names_to_Label = new Map<string,string>();
+              List<Schema.SObjectField> fields = ChatterArchiveManager.getParentSobjectFields((string)rdmFeed.get('parentId'));
+            for(Schema.SObjectField fld : fields){
+                mapFieldAPI_Names_to_Label.put(fld.getDescribe().getName(),fld.getDescribe().getLabel());
+            }
+            return mapFieldAPI_Names_to_Label;
+       }
+       //This method creates the Body of a Status Post
+       public static string getFeedPostBody(sObject rdmFeed, string DeleteInfo, string ParentSobjectName,RFC2822_Archive__c rfc2822Arch){
+         string body = '';
+         sObject createdBy = rdmFeed.getSObject('CreatedBy');
+         Map<string,string> mapFieldAPI_Names_to_Label = new Map<string,string>();
+         List<Schema.SObjectField> fields = ChatterArchiveManager.getParentSobjectFields((string)rdmFeed.get('parentId'));
+         for(Schema.SObjectField fld : fields){
+                mapFieldAPI_Names_to_Label.put(fld.getDescribe().getName(),fld.getDescribe().getLabel());
+         }
+            // For Feed Tracked Changes, the feed body is null
+            List<FeedTrackedChange> lstFeedTrackedChanges = (List<FeedTrackedChange>)rdmFeed.getSObjects('FeedTrackedChanges');
+            String parentName = '';
+            String parentNameLabel ='';
+            if(ParentSobjectName <> 'ContentDocument' && rdmFeed.getSObject('Parent') <> null){ 
+                parentName = String.ValueOf(rdmFeed.getSObject('Parent').get('Name'));
+                parentNameLabel = String.ValueOf(rdmFeed.getSObject('Parent').getSObjectType().getDescribe().getLabel());
+            }
+            
+            if(lstFeedTrackedChanges <> null){
+                body = getBody(String.ValueOf(rdmFeed.get('parentId')));
+                //'Update Record ID ' + rdmFeed.get('parentId') + ' with the following changes:\n'; 
+                string summary= createdBy.get('Name') + ' changed ';
+                string body2='';
+                for(FeedTrackedChange change: lstFeedTrackedChanges){
+                    string fieldLabel = change.FieldName;
+                    List<string> lstString = ChatterArchiveManager.getChangeSummaryAndBody(  change.FieldName,ParentSobjectName,parentNameLabel,parentName,rfc2822Arch.ContentDocumentTitle__c,String.valueOf(createdBy.get('Name')),(change.OldValue == null?'blank': String.valueOf(change.OldValue)),(change.NewValue == null?'blank': String.valueOf(change.NewValue)),mapFieldAPI_Names_to_Label);
+                    if((ParentSobjectName == 'ContentDocument' && ( fieldLabel=='contentVersionCreated'||fieldLabel=='created'))
+                        ||(fieldLabel=='created')  ){
+                        summary = lstString[0];
+                       
+                    }else{
+                        //summary += lstString[0];
+                        summary = '' ;
+                        body2 += lstString[1];
+                    }
+                }
+                summary = ChatterArchiveManager.RemoveTrailingString(summary,' and ');
+                //body2 = ChatterArchiveManager.RemoveTrailingString(body2,'\n');
+                //body = body + summary + '\n' + body2;
+                body = body + summary + (body2 != '' ? '\n' + body2 : '');
+            }
+            return body;
+       }
+       public static string RemoveTrailingString(String str1, String str2){
+        if(str1.endsWith(str2)){
+            str1  = str1.substring(0,str1.lastIndexOf(str2));
+        }
+        return str1;
+       }
+       public static List<string> getChangeSummaryAndBody( string fieldLabel,string ParentSobjectTypeName, string ParentSobjectLabel,string ParentName,string ContentDocTitle, string createdBy,string oldVal,string newVal,Map<string,string> mapFieldAPI_Names_to_Label){
+            List<string> lstString = new List<string>(); 
+            string summary ='';
+            string body2 ='';
+            if(fieldLabel.contains('.')){
+                fieldLabel = mapFieldAPI_Names_to_Label.get(fieldLabel.split('\\.')[1] );
+            }
+            if(ParentSobjectTypeName == 'ContentDocument' && fieldLabel=='contentVersionCreated'){
+                summary = ChatterArchiveManager.getContentVersionSummary(ContentDocTitle,createdBy,true);
+            }else if(ParentSobjectTypeName == 'ContentDocument' && fieldLabel=='created') {
+                summary = ChatterArchiveManager.getContentVersionSummary(ContentDocTitle,createdBy,false);
+            }else if(fieldLabel=='created'){
+                String label =  ParentSobjectLabel;
+                summary = ChatterArchiveManager.fieldCreatedSummary(ParentName,createdBy,label); 
+                if(ParentSobjectTypeName == 'Campaign'){
+                     
+                
+                        //11/18/2011 Manisha Gupta : added a new filed Campaign Summary in query.
+                                Campaign newCampaign = [select name,startDate,EndDate,Description,campaign_summary__c from campaign where id=:objId] ;
+                                summary += '\n' ;
+                                system.debug('^^^^^^^^^^^^^^^^^' + newCampaign) ;
+                                if(newCampaign != null) {
+                                    system.debug('^^^^^^^^^^^^^^^^^') ;
+                                    if(newCampaign.StartDate != null) {
+                                        summary += 'Campaign Start date : ' + newCampaign.StartDate +'\n';
+                                    }
+                                    if(newCampaign.EndDate != null) {
+                                        summary += 'Campaign End date : ' + newCampaign.EndDate +'\n';
+                                    }
+                                    if(newCampaign.Description != null && newCampaign.Description != '') {
+                                        summary += 'Campaign Description : ' + newCampaign.Description +'\n';
+                                    }
+                                    // 11/18/2011 Manisha Gupta : added campaign summary in archive body
+                                    if(newCampaign.campaign_summary__c != null) {
+                                        summary += 'Campaign Summary : ' + newCampaign.campaign_summary__c +'\n';
+                                    }
+                                }
+                }
+                
+            }else{
+                 if(ParentSobjectTypeName == 'Campaign'){
+                     //Campaign newCampaign = [select name,startDate,EndDate,Description,campaign_summary__c from campaign where id=:objId] ;
+                     if (fieldLabel=='Description' ){
+                        newVal = (newDesc == null?'blank': String.valueOf(newDesc));
+                        oldVal = (oldDesc == null?'blank': String.valueOf(oldDesc));
+                        
+                     }
+                     else if (fieldLabel=='Campaign Summary' ){
+                        newVal = (newSumm == null?'blank': String.valueOf(newSumm));
+                        oldVal = (oldSumm == null?'blank': String.valueOf(oldSumm));
+                     }
+                
+                }
+                body2 += ChatterArchiveManager.getFieldUpdatedBody(fieldLabel,oldVal,newVal);
+                summary +=  fieldLabel;
+                summary += ChatterArchiveManager.getFieldUpdatedSummary(fieldLabel,oldVal,newVal);  
+            }
+            lstString.add(summary);
+            lstString.add(body2);
+            return lstString;
+       }
+      public static String getFieldUpdatedSummary(String fieldLabel,string oldVal,string newVal) {
+            string summary = '';
+            if(OldVal == 'blank' && NewVal == 'blank'){
+                summary +=  ' and ';
+            }else{
+                summary +=  ' from ' + oldVal + ' to ' + newVal + ' and ';
+            }
+            return summary;
+       }
+      public static String getFieldUpdatedBody(String fieldLabel,string oldVal,string newVal) {
+        string body2='';
+        if(OldVal == 'blank' && NewVal == 'blank'){
+                body2 += 'Changed ' + fieldLabel + '.\n'; 
+        }else{
+                body2 += 'Original ' + fieldLabel + ' value: ' ;
+                body2 +=  oldVal + '\n' ;
+                body2 +=  'Updated '+ fieldLabel + ' value: ';
+                body2 +=  newVal + '\n' ;
+            }
+            return body2;
+       }
+       public static String fieldCreatedSummary(String parentName,String createdBy,String Label) {
+         String summary = parentName + ' - ' + createdBy + ' created this ' + Label + '.';
+         return summary;
+       }
+       public static String getBody(String parentId) {
+            String body = 'Updated Record ID ' + parentId + ' with the following changes:\n';
+            return body; 
+       }
+       public static String getContentVersionSummary(String Title,String UpdatedBy , boolean isUpdated) {
+            String summary = '';
+            if(isUpdated) {
+                summary  += Title  + ' - ' + UpdatedBy + ' uploaded a new version of this file.';
+            } else {
+                summary += Title  + ' - ' + UpdatedBy + ' created this file.';
+            }
+            return summary;
+       } 
+        // This method returns the span tag for a deleted Post/comment 
+       public static  string getDeleteInfoSpanTag(boolean forDelete){
+            if(forDelete)   {
+                return '<span class="deleted">Deleted on ' + DateTime.now() + '</span>' ;
+            }else{
+                return '';
+            }
+       }
+        // This method returns the span tag for a referenced Post
+        //RA: Zantaz File Enhancement 17 Feb 2012
+       private  string getPostReferenceSpanTag(sObject rdmFeed, boolean isForCmtAttachment){
+            DateTime createdDt = (DateTime)rdmFeed.get('CreatedDate');
+            if(createdDt < Date.today() || isForCmtAttachment){ //RA: Zantaz File Enhancement 17 Feb 2012
+                return ' <span class="reference">Included for Context</span> ';         
+            }else{
+                return '';
+            }
+       }
+       // This method returns the div tag for a Chatter  comment 
+       //RA: Zantaz File Enhancement 17 Feb 2012
+       public static  string getSingleChatterCommentDiv(FeedComment feedCmt, string DeleteInfo, boolean isForCmtAttachment){
+             // Added on 16 Feb 2012 RA: Zantaz File Enhancement  
+            //return '        <div id="' + feedCmt.id + '" class="chatterPost"> \n' + DeleteInfo +    feedCmt.CreatedDate +' ' +  feedCmt.CreatedBy.Name + ' - ' +feedCmt.CommentBody +'\n' + '       </div>\n ' ;
+            string commentDiv =  '        <div id="' + feedCmt.id + '" class="chatterPost"> \n' + DeleteInfo +    feedCmt.CreatedDate +' ' +  feedCmt.CreatedBy.Name + ' - ' +feedCmt.CommentBody +'\n' + '  @UploadedFileName     </div>\n ' ;
+            string uploadedFileName = '';
+            if(feedCmt.CommentType == 'ContentComment' && isForCmtAttachment){//RA: Zantaz File Enhancement 17 Feb 2012
+                List<ContentVersion> lstCv = [select id, title from ContentVersion where id =: feedCmt.RelatedRecordId];
+                Integer listsize = lstCv.size();
+                uploadedFileName = lstCv.size() > 0? feedCmt.CreatedBy.Name + ' posted a file \n' + lstCv[listsize-1].title + ' \n  ' : '';
+            }
+            commentDiv =commentDiv.replace('null',''); //VM : Added as part of QC 2922
+            return commentDiv.replace('@UploadedFileName', uploadedFileName);
+       }
+      //This method returns the div tags for a all Chatter  comments
+       public  string getAllChatterCommentDiv(sObject rdmFeed,FeedComment currentFeedCmt,string DeleteInfo){
+            List<FeedComment> lstFeedComments = (List<FeedComment>)rdmFeed.getSObjects('FeedComments');
+            string comments = '';
+            for(FeedComment feedCmt : lstFeedComments){
+                if(feedCmt.id == currentFeedCmt.id){
+                    comments += getSingleChatterCommentDiv(feedCmt,DeleteInfo, false); //RA: Zantaz File Enhancement 17 Feb 2012
+                }else{
+                    comments += getSingleChatterCommentDiv(feedCmt,'', false); //RA: Zantaz File Enhancement 17 Feb 2012
+                }
+            }
+            return comments;
+       }
+       // This method returns the div tag for a Chatter Post and comment 
+       //RA: Zantaz File Enhancement 17 Feb 2012
+       private  string getChatterPostCommentDiv(sObject rdmFeed,FeedComment feedCmt, string referenceSpan ,string DeleteInfo,string ParentSobjectName,RFC2822_Archive__c rfc2822Arch,boolean addAllComments, boolean isForCmtAttachment){
+        system.debug('********' + rdmFeed.get('Type'));
+           sobject createdBy = rdmFeed.getSObject('CreatedBy');
+           string body='';
+           String divBody='    <div id="' + rdmFeed.get('id') + '" class="chatterPost"> \n' +
+                            referenceSpan    +  rdmFeed.get('CreatedDate') +' ' +  createdBy.get('Name') + ' - @body@\n' + 
+                         (addAllComments==true? getAllChatterCommentDiv(rdmFeed,feedCmt,DeleteInfo) : getSingleChatterCommentDiv(feedCmt,DeleteInfo, isForCmtAttachment) )  +  //RA: Zantaz File Enhancement 17 Feb 2012            
+                '   &nbsp;</div>\n' ; 
+              if(rdmFeed.get('Body') <> null){
+                body = (string)rdmFeed.get('Body');
+             }
+             if(rdmFeed.get('Type') == 'TrackedChange'){
+                body = ChatterArchiveManager.getFeedPostBody( rdmFeed,  '',  ParentSobjectName, rfc2822Arch);   
+             } else if(rdmFeed.get('Type') == 'LinkPost'){
+                body += createdBy.get('Name') + ' posted a link\n ';
+                body +=(string)rdmFeed.get('Title')+ ' \n ';
+                body += (string)rdmFeed.get('LinkUrl') + '\n' ;
+            }else if(rdmFeed.get('Type') == 'ContentPost'){
+                body += createdBy.get('Name') + ' posted a file\n ';
+                body +=(string)rdmFeed.get('ContentFileName')+ ' \n ';
+                
+                system.debug ((string)rdmFeed.get('ContentFileName') + '******');
+            }      
+             divBody = divBody.replace('@body@',body );
+             divBody = divBody.replace('null',''); //VM : Added as part of QC 2922     
+             return divBody;     
+       }
+    /*
+     * This Method Generates the RFC2822_Archive for a list of Feed Items
+     * If an RFC2822_Archive exists for the Parent object for that day, then it is updated else create a new RFC2822_Archive object
+     */
+    public  void ArchivePostToRFC2822(Map<Id,FeedItem> mapRDMFeedItems,boolean forDelete,string ParentSobjectName){
+           Set<Id> newFeedItems = mapRDMFeedItems.keySet();
+            //Retrieve the Feeds for the  parent object 
+            List<Sobject> rdmFeedList = ChatterArchiveManager.getFeeds( newFeedItems,ParentSobjectName,false,this.archiveBuilder);
+            if(rdmFeedList.size()>0){
+                ArchiveToRFC2822( rdmFeedList, forDelete, ParentSobjectName);
+            }
+           // UpdateContentVersionFields(rdmFeedList[0]);
+            
+    } 
+    /*
+     * This Method Generates the RFC2822_Archive for a list of Feed Items
+     * If an RFC2822_Archive exists for the Parent object for that day, then it is updated else create a new RFC2822_Archive object
+     */
+    public  void ArchiveToRFC2822(List<Sobject> rdmFeedList,boolean forDelete,string ParentSobjectName){
+        String DocumentLink='';
+        //Set of Parent Ids
+        Set<String> parentIds = new Set<String>();
+        Set<String> parentPostIds = new Set<String>();
+            Sobject createdBy ;
+            for(Sobject rdmFeed : rdmFeedList){ 
+                parentPostIds.add((string)rdmFeed.get('Id'));
+                parentIds.add((string)rdmFeed.get('ParentId'));
+                createdBy = rdmFeed.getSObject('CreatedBy');
+                system.debug('rdmFeedddd____'+rdmFeed);
+
+            }
+           //Get the Parent Ids to be used- ObjectFeed Id or Object Id
+           parentIds =  archiveBuilder.getParentIds( parentIds,   parentPostIds);//getParentIds( parentIds, ParentSobjectName,  parentPostIds);
+            //Get Existing RFC2822_Archive__c for the current day  
+             List<RFC2822_Archive__c> lstTodaysArchives =  archiveBuilder.getExistingRFC2822_Archives(parentIds,createdBy);
+            //Loop Over all Feed to Create/Update the RFC2822_Archive
+            //If No RFC2822_Archive exists, create new else update it
+            List<RFC2822_Archive__c> lstRFCToInsert = new List<RFC2822_Archive__c>();
+            for(Sobject rdmFeed : rdmFeedList){ 
+
+               string parentID = (string)rdmFeed.get('ParentId');
+                RFC2822_Archive__c rfc2822Arch = new RFC2822_Archive__c();
+                if(lstTodaysArchives.size()>0){
+                    rfc2822Arch= lstTodaysArchives[0];//archiveBuilder.getExistingArchive(mapRFC2822_Archive,  parentId, (string)rdmFeed.get('Id'));
+                    system.debug('==========archive list TODAY==============' + lstTodaysArchives[0]) ;
+                }
+                if(rfc2822Arch.id == null){
+                    System.debug('_____________Inside ArchivePostToRFC2822 ____________________CREATE NEW');
+                    rfc2822Arch = create_RFC2822_Archive_For_Posts( rfc2822Arch, parentID, rdmFeed ,forDelete,ParentSobjectName,0,true)  ;
+                }else if(rfc2822Arch.Archive_Date__c <> Date.Today()){
+                    //Create Copy of Existing Archive
+                     System.debug('_____________Inside ArchivePostToRFC2822 ____________________COPY FROM EXISTING');
+                    lstTodaysArchives = copyRFC2822_Archive(lstTodaysArchives);
+                     rfc2822Arch= lstTodaysArchives[0];
+                     System.debug('_____________Inside ArchivePostToRFC2822 ____________________COPY FROM EXISTING____' + rfc2822Arch);
+                    rfc2822Arch = update_RFC2822_Archive_For_Posts( rfc2822Arch, parentID, rdmFeed ,forDelete,ParentSobjectName)  ;
+                }
+                else{
+                    System.debug('_____________Inside ArchivePostToRFC2822 ____________________UPDATE');
+                    rfc2822Arch = update_RFC2822_Archive_For_Posts( rfc2822Arch, parentID, rdmFeed ,forDelete,ParentSobjectName)  ;
+                }
+                lstRFCToInsert.add(rfc2822Arch);
+            }
+            
+            
+        } 
+        // This method Creates a new RFC2822_Archive__c in case of Feed Post updates
+        private   RFC2822_Archive__c create_RFC2822_Archive_For_Posts( RFC2822_Archive__c rfc2822Arch,string parentID,sObject rdmFeed ,boolean forDelete, string ParentSobjectName,Integer index,boolean addContentLink ){
+            sObject createdBy = rdmFeed.getSObject('CreatedBy');
+            sObject parent = null; //rdmFeed.getSObject('Parent');
+            //Create Subject
+            String sub =  archiveBuilder.getArchiveSubject(parent,createdBy);//getArchiveSubject(parent,ParentSobjectName,createdBy);
+            //Create From 
+            string strFrom  =  archiveBuilder.getFromAddress(parent,createdBy);//getFromAddress(parent,ParentSobjectName,createdBy);
+            //Create To
+            String strTo = archiveBuilder.getFirstToAddressForPost( strFrom,  createdBy , parent  );//getFirstToAddressForPost( strFrom,  ParentSobjectName,    createdBy );
+            //Create the Archive
+            rfc2822Arch = create_RFC2822_Archive(rfc2822Arch, parentID, sub, strFrom,strTo,rdmFeed,index,addContentLink);
+            rfc2822Arch = setBodyFields( archiveBuilder, rfc2822Arch,  rdmFeed , forDelete,  ParentSobjectName,  addContentLink, parent );
+            
+            update rfc2822Arch;
+            return rfc2822Arch;
+        }
+        
+        public static RFC2822_Archive__c setBodyFields(ChatterArchiveManager.iArchiveBuilder archiveBuilder, RFC2822_Archive__c rfc2822Arch,sObject rdmFeed ,boolean forDelete, string ParentSobjectName,boolean addContentLink,sObject parent ){
+            
+            system.debug((string)rdmFeed.get('ContentFileName') + '**FileName3'); 
+            String styleTag =            ChatterArchiveManager.getHTMLStyleTag();
+            String divMessageId =        ChatterArchiveManager.getHTMLMessageDivTag(rfc2822Arch.SourceID__c);
+            
+            //QC - 1870:  22 Aug 2013
+            String feedObjectName = rdmFeed.getSObjectType().getDescribe().getName();            
+            if(feedObjectName.equalsIgnoreCase('CollaborationGroupFeed')){           
+            
+            string groupName = String.ValueOf(rdmFeed.getSObject('Parent').get('Name'));
+            if(!String.isEmpty(groupName)){
+              divMessageId += '  <div id="groupName">Group Name: '+ groupName + '</div>\n' ;
+            }
+        }
+            String divPrimaryMaterial =  archiveBuilder.getHTMLPrimaryMaterialDivTag(parent );//getHTMLPrimaryMaterialDivTag(parent,ParentSobjectName );
+            String divChatterFeed = ' <div id="chatterFeed">\n @chatterPosts &nbsp;&nbsp;</div>';
+            String DeleteInfo = ChatterArchiveManager.getDeleteInfoSpanTag(forDelete);
+            String divChatterPost = ChatterArchiveManager.getChatterPostDiv(rdmFeed,DeleteInfo,ParentSobjectName,rfc2822Arch) ;
+            divChatterFeed = divChatterFeed.replace('@chatterPosts', divChatterPost);
+            string plainBody = styleTag + '<div id="archiveBody">\n'+ divMessageId + divPrimaryMaterial +  divChatterFeed + '</div>';
+            rfc2822Arch.Body_Plain_Text__c = plainBody;
+            EncodeData(rfc2822Arch);
+            return rfc2822Arch;
+        }
+         // This method Updates the RFC2822_Archive__c 
+         private   RFC2822_Archive__c update_RFC2822_Archive_For_Posts( RFC2822_Archive__c rfc2822Arch,string parentID,sObject rdmFeed , boolean forDelete,string ParentSobjectName){
+
+            sObject createdBy = rdmFeed.getSObject('CreatedBy');
+            string email = (string)createdBy.get('email');
+            if(!(rfc2822Arch.To__c.indexOf( email) >= 0)){
+                rfc2822Arch.To__c = rfc2822Arch.To__c + ';' + '"' + createdBy.get('lastname') +  (createdBy.get('firstname') <> null && createdBy.get('firstname') <> '' ? ', ' + createdBy.get('firstname'):'') + '" <' + createdBy.get('email') + '>';
+            }
+            String DeleteInfo = ChatterArchiveManager.getDeleteInfoSpanTag(forDelete);
+            String divChatterPost = ChatterArchiveManager.getChatterPostDiv(rdmFeed,DeleteInfo,ParentSobjectName,rfc2822Arch) ;
+            integer ind = rfc2822Arch.Body_Plain_Text__c.indexOf('<div id="' + rdmFeed.get('id') +'"');
+            if(ind < 0){
+                //If Div does not exists then we need to add div fro the new post
+                //rfc2822Arch.Body_Plain_Text__c  = rfc2822Arch.Body_Plain_Text__c.replace('&nbsp;&nbsp;', divChatterPost +'&nbsp;&nbsp;');
+                 boolean isAppended  = checkLengthAndAppend( rfc2822Arch,  '&nbsp;&nbsp;',  divChatterPost +'&nbsp;&nbsp;');
+                     if(!isAppended){
+                        Integer index = rfc2822Arch.Index__c.intValue() ;
+                        rfc2822Arch = new RFC2822_Archive__c();
+                        return create_RFC2822_Archive_For_Posts(  rfc2822Arch, parentID, rdmFeed,  forDelete,ParentSobjectName,index+1,false);
+                     }
+            }else{
+                 //If the div for feed already exists, it means its being updated for delete operation
+                integer ind2 = rfc2822Arch.Body_Plain_Text__c.indexOf('\n',ind);
+                String subString  = rfc2822Arch.Body_Plain_Text__c.subString(ind,ind2 +1 );
+                String subString2   = subString + DeleteInfo;
+                //rfc2822Arch.Body_Plain_Text__c = rfc2822Arch.Body_Plain_Text__c.replace(subString,subString2);
+                 boolean isAppended  = checkLengthAndAppend( rfc2822Arch,  subString,  subString2);
+                 if(!isAppended){
+                    Integer index = rfc2822Arch.Index__c.intValue();
+                    rfc2822Arch = new RFC2822_Archive__c();
+                   return create_RFC2822_Archive_For_Posts(  rfc2822Arch, parentID, rdmFeed , forDelete,ParentSobjectName,index+1,false);
+                 }
+            }
+            EncodeData(rfc2822Arch);
+            rfc2822Arch.Archive_Status__c = STATUS_READY;
+            update rfc2822Arch;
+            return rfc2822Arch;
+        }
+     // This method Creates a new RFC2822_Archive__c in case of Feed Comment updates
+    public void ArchiveCommentsToRFC2822(Map<Id,FeedComment> mapRDMFeedComments,boolean forDelete, string ParentSobjectName){
+        Set<String> parentIds = new Set<String>();
+        Set<String> parentPostIds = new Set<String>();
+       // Map<String,RFC2822_Archive__c> mapRFC2822_Archive = new Map<String,RFC2822_Archive__c>() ;
+        Set<Id> newFeedItems = new Set<Id>() ;
+            for(FeedComment feedCmt: mapRDMFeedComments.values()){
+                parentIds.add(feedCmt.parentId);
+               newFeedItems.add(feedCmt.FeedItemId );
+              }
+            //Get Feed List
+            List<sObject> rdmFeedList =  ChatterArchiveManager.getFeeds(  newFeedItems, ParentSobjectName,false,this.archiveBuilder);
+            system.debug('RA_rdmFeedList ---> ' + rdmFeedList);
+            Map<String,sObject> mapFeedItem_RDMFeed = new   Map<String,sObject>() ;
+            String DocumentLink;
+            sObject createdBy;
+            System.debug('ArchiveCommentsToRFC2822__________________-rdmFeedList________________'+ rdmFeedList);
+            for(sObject rdmFeed : rdmFeedList){ 
+                 mapFeedItem_RDMFeed.put((string)rdmFeed.get('Id'),rdmFeed);
+              parentPostIds.add((string)rdmFeed.get('Id'));
+                createdBy = rdmFeed.getSObject('CreatedBy');
+            }
+            system.debug('RA_mapFeedItem_RDMFeed ---> ' + mapFeedItem_RDMFeed);
+            parentIds  = archiveBuilder.getParentIds(parentIds,  parentPostIds)      ;//getParentIds(parentIds, ParentSobjectName, parentPostIds)      ;
+            //Get Existing Archives for the current day
+            List<RFC2822_Archive__c> lstTodaysArchives =  archiveBuilder.getExistingRFC2822_Archives(parentIds,createdBy);
+            List<RFC2822_Archive__c> lstRFCToInsert = new List<RFC2822_Archive__c>();
+            system.debug('RA_mapRDMFeedComments ---> ' + mapRDMFeedComments);
+            for(FeedComment feedCmt: mapRDMFeedComments.values()){
+                string parentID = feedCmt.parentId;
+                RFC2822_Archive__c rfc2822Arch = new RFC2822_Archive__c();
+                sObject rdmFeed = mapFeedItem_RDMFeed.get(feedCmt.FeedItemId);
+                if(lstTodaysArchives.size()>0){
+                    rfc2822Arch= lstTodaysArchives[0];//archiveBuilder.getExistingArchive(mapRFC2822_Archive,  parentId, (string)rdmFeed.get('Id'));
+                }
+                
+                
+                
+                /*if(rdmFeed == null)
+                    continue;*/
+                FeedComment currentFeedCommentDetails;
+                system.debug('RA_rdmFeed ---> ' + rdmFeed);
+                sObject[] feedCmts = rdmFeed.getSobjects('FeedComments');
+                 
+                 system.debug('feedCmt.id---> ' +  feedCmt.id);
+                for(sObject objComment: feedCmts){
+                    
+                    FeedComment cmt = (FeedComment)objComment;
+                    system.debug('cmt.id    ---> ' + cmt.id);
+                    if(cmt.id == feedCmt.id){
+                        currentFeedCommentDetails = cmt;
+                        break;
+                    }
+                }
+                
+                //17 Feb 2012: RA : ADD CONFITION TO IDENTIFY THAT ANY ATTACHMENT IS AVAILABLE WITH COMMENT OR NOT
+                if(currentFeedCommentDetails.CommentType == 'ContentComment' && forDelete == false){
+                    CreateRFCArchiveForCommentAttachment(rdmFeed, ParentSobjectName, currentFeedCommentDetails);            
+                }
+                
+                if(rfc2822Arch.id == null){
+                    //RA: Zantaz File Enhancement 17 Feb 2012
+                    rfc2822Arch = create_RFC2822_Archive_For_Comments( rfc2822Arch,  currentFeedCommentDetails,  rdmFeed,forDelete, ParentSobjectName,0,true,true, false)   ;
+                }else if(rfc2822Arch.Archive_Date__c <> Date.Today()){
+                    //rfc2822Arch exists for a previous day 
+                     System.debug('_____________Inside ArchivePostToRFC2822 ____________________COPY FROM EXISTING');
+                    //Create Copy of Existing Archive                   
+                    lstTodaysArchives = copyRFC2822_Archive(lstTodaysArchives);
+                    rfc2822Arch= lstTodaysArchives[0];
+                    System.debug('_____________Inside ArchivePostToRFC2822 ____________________COPY FROM EXISTING____' + rfc2822Arch);
+                    rfc2822Arch = update_RFC2822_Archive_For_Comments( rfc2822Arch, currentFeedCommentDetails, rdmFeed,forDelete, ParentSobjectName) ;
+                } else {
+                    //Update Body
+                    rfc2822Arch = update_RFC2822_Archive_For_Comments( rfc2822Arch, currentFeedCommentDetails, rdmFeed,forDelete, ParentSobjectName) ;
+                }
+                lstRFCToInsert.add(rfc2822Arch);
+            }
+            
+            
+        } 
+        // This Method Creates A Copy of the RFC2822_Archive
+        public List<RFC2822_Archive__c> copyRFC2822_Archive(List<RFC2822_Archive__c> lst_rfc2822Arch){
+            List<RFC2822_Archive__c> lst_Copy = new List<RFC2822_Archive__c>();
+            List<RFC2822_Archive__c> lst_Copy_update = new List<RFC2822_Archive__c>();
+            for(RFC2822_Archive__c rfc2822Arch : lst_rfc2822Arch){
+                RFC2822_Archive__c copy = new RFC2822_Archive__c();
+                sObject obj = (sObject)rfc2822Arch;
+                //opt_preserve_id = false,  opt_IsDeepClone = false,  opt_preserve_readonly_timestamps = false,  opt_preserve_autonumber  false
+                copy = rfc2822Arch.clone(false,false,false,false);
+                copy.ContentDocument_ID__c = null;
+                copy.ContentDocumentLink__c ='';
+                copy.ContentDocumentTitle__c ='';
+                copy.ContentDocumentName__c='';
+                copy.ContentDocumentType__c ='';
+                copy.Message_ID__c = 'Salesforce-GPS'+System.Label.sndbx +'-'+ DateTime.Now().format('yyyyMMdd') +'Z'+ DateTime.Now().format('hhmmss') + '-I-[objectID]' + MESSAGE_HOST_ADDRESS ;
+                lst_Copy.add(copy);
+            }
+            insert lst_Copy;
+            for(RFC2822_Archive__c copy : lst_Copy){
+                copy = getExistingRFC2822_Archive(copy.id );
+                copy.Message_ID__c = copy.Message_ID__c.replace('[objectID]', copy.Id);
+                lst_Copy_update.add(copy);
+            }
+            update lst_Copy_update;
+            return lst_Copy_update;
+        }
+        
+        public static RFC2822_Archive__c initialize_RFC2822_Archive(RFC2822_Archive__c rfc2822Arch,string parentID,string sub,string strFrom, string strTo,sObject rdmFeed,Integer index , boolean addContentLink,ChatterArchiveManager.iArchiveBuilder archiveBuilder){
+            
+            //Set feed id
+            rfc2822Arch.Index__c = index;
+            rfc2822Arch.Feed_Id__c = (string)rdmFeed.get('Id');            
+            
+            rfc2822Arch.SourceID__c = archiveBuilder.getSourceID(rdmFeed) ;// getSourceID(rdmFeed,ParentSobjectName) // parentID;
+            rfc2822Arch.Subject__c = sub;
+            rfc2822Arch.Body__c = '';
+            rfc2822Arch.Body_Plain_Text__c ='';
+            //       Value Changed From 'GPSCommunication.' To 'Salesforce-' + System.Label.sndbx +'-'   18-May-2011
+            // 07-14-11 Dan  Value Changed From 'Salesforce-' To 'Salesforce-GPS-' + System.Label.sndbx +'-'   
+            rfc2822Arch.Message_ID__c = 'Salesforce-GPS'+System.Label.sndbx +'-'+ DateTime.Now().format('yyyyMMdd') +'Z'+ DateTime.Now().format('hhmmss') + '-I-[objectID]' + ChatterArchiveManager.MESSAGE_HOST_ADDRESS ;
+            rfc2822Arch.From__c = strFrom;
+            rfc2822Arch.To__c = strTo ;//'"' + feedCmt.CreatedBy.lastname +  (feedCmt.CreatedBy.firstname <> null && feedCmt.CreatedBy.firstname <> '' ? ', ' + feedCmt.CreatedBy.firstname:'') + '" <' + feedCmt.CreatedBy.email + '>';
+           //if((string)rdmFeed.get('Type') == 'ContentPost' ){
+           if((string)rdmFeed.get('ContentFileName')<> null && addContentLink == true){
+                 rfc2822Arch = archiveBuilder.setContentDocumentFields(rdmFeed,rfc2822Arch, ChatterArchiveManager.getHostURL());
+            }
+            
+            ContentVersion doc = ChatterArchiveManager.getContentDocument(parentID);
+            if(doc <> null){
+                string mimetype= getMimeType(doc.PathOnClient);
+                //rfc2822Arch=  archiveBuilder.setRFCArchiveDocumentFields( rfc2822Arch, doc.Title , doc.Id, getHostURL(),(string)rdmFeed.get('ContentType'));
+                rfc2822Arch=  archiveBuilder.setRFCArchiveDocumentFields( rfc2822Arch, doc.PathOnClient , doc.Id, ChatterArchiveManager.getHostURL(),mimetype);
+             }
+             
+            String feedObjectName = rdmFeed.getSObjectType().getDescribe().getName();
+            rfc2822Arch.FeedObjectName__c = feedObjectName;
+            if(feedObjectName.equalsIgnoreCase('CollaborationGroupFeed')){
+                rfc2822Arch.GroupName__c = String.ValueOf(rdmFeed.getSObject('Parent').get('Name'));//CRMGPS-3827
+            }
+            
+            
+            return rfc2822Arch;
+        }
+         // This method Fills the RFC2822 archive
+        private RFC2822_Archive__c create_RFC2822_Archive(RFC2822_Archive__c rfc2822Arch,string parentID,string sub,string strFrom, string strTo,sObject rdmFeed,Integer index , boolean addContentLink){
+            //Set feed id
+            
+            
+            
+            
+            
+            
+            rfc2822Arch = ChatterArchiveManager.initialize_RFC2822_Archive( rfc2822Arch, parentID, sub, strFrom,  strTo, rdmFeed, index ,  addContentLink,this.archiveBuilder);
+            system.debug('------rfc2822Arch'+rfc2822Arch);
+            insert rfc2822Arch;
+            rfc2822Arch = getExistingRFC2822_Archive(rfc2822Arch.id );
+            rfc2822Arch.Message_ID__c = rfc2822Arch.Message_ID__c.replace('[objectID]', rfc2822Arch.Id);
+            return rfc2822Arch;
+        }
+         // This Method creates new  RFC2822_Archive__c in case of Feed Comment updates
+         //RA: Zantaz File Enhancement 17 Feb 2012
+         private  RFC2822_Archive__c create_RFC2822_Archive_For_Comments(  RFC2822_Archive__c rfc2822Arch,FeedComment feedCmt,sObject rdmFeed,  boolean forDelete,string ParentSobjectName,Integer index, boolean addContentLink,boolean addAllComments, boolean isForCmtAttachment){
+            string parentID = (string)rdmFeed.get('parentId');
+            sObject objParent ;
+            system.debug('_________ rdmFeed.getSObjectType().getDescribe().getName()_______' + rdmFeed.getSObjectType().getDescribe().getName());
+            if(rdmFeed.getSObjectType().getDescribe().getName() <>'ContentDocumentFeed'){
+                 objParent =  rdmFeed.getSObject('Parent');
+            }   
+            sObject createdBy = rdmFeed.getSObject('CreatedBy');
+            String sub = archiveBuilder.getArchiveSubject(objParent,createdBy);//getArchiveSubject(objParent,ParentSobjectName,createdBy);
+            string strFrom  = archiveBuilder.getFromAddress(objParent,createdBy);//getFromAddress(objParent,ParentSobjectName,createdBy);
+            String strTo = '"' + feedCmt.CreatedBy.lastname +  (feedCmt.CreatedBy.firstname <> null && feedCmt.CreatedBy.firstname <> '' ? ', ' + feedCmt.CreatedBy.firstname:'') + '" <' + feedCmt.CreatedBy.email + '>';
+            //rfc2822Arch = create_RFC2822_Archive(rfc2822Arch, parentID, sub, strFrom,strTo,rdmFeed ,index, addContentLink);
+            rfc2822Arch = ChatterArchiveManager.initialize_RFC2822_Archive( rfc2822Arch, parentID, sub, strFrom,  strTo, rdmFeed, index ,  addContentLink,this.archiveBuilder);
+                        
+            String styleTag =           ChatterArchiveManager.getHTMLStyleTag();
+            String divMessageId =       ChatterArchiveManager.getHTMLMessageDivTag(rfc2822Arch.SourceID__c);
+            
+            //25 Feb 2014:  Dinesh M:   QC2448, Zantaz-Chatter: Files uploaded in comment section, deleted from comment section do not have the group name associated in outlook mail box
+            String feedObjectName = rdmFeed.getSObjectType().getDescribe().getName();  
+                      
+            if(feedObjectName.equalsIgnoreCase('CollaborationGroupFeed')){  
+                string groupName = String.ValueOf(rdmFeed.getSObject('Parent').get('Name'));
+                
+                if(isForCmtAttachment && !String.isEmpty(groupName)){
+                  divMessageId += '  <div id="groupName">Group Name: '+ groupName + '</div>\n' ;
+                }               
+            }
+            
+            String divPrimaryMaterial = archiveBuilder.getHTMLPrimaryMaterialDivTag(objParent );//getHTMLPrimaryMaterialDivTag(objParent,ParentSobjectName );
+            String divChatterFeed = ' <div id="chatterFeed">\n @chatterPosts &nbsp;&nbsp;</div>'; 
+            String DeleteInfo = ChatterArchiveManager.getDeleteInfoSpanTag(forDelete);
+            String referenceSpan = getPostReferenceSpanTag(rdmFeed, isForCmtAttachment); //RA: Zantaz File Enhancement 17 Feb 2012
+            String divChatterPost = getChatterPostCommentDiv( rdmFeed, feedCmt,  referenceSpan , DeleteInfo, ParentSobjectName, rfc2822Arch,addAllComments, isForCmtAttachment) ;      //RA: Zantaz File Enhancement 17 Feb 2012
+            divChatterFeed = divChatterFeed.replace('@chatterPosts', divChatterPost);
+            string plainBody = styleTag + '<div id="archiveBody">\n'+ divMessageId + divPrimaryMaterial + divChatterFeed + '</div>';
+            rfc2822Arch.Body_Plain_Text__c = plainBody;
+            EncodeData(rfc2822Arch);
+            //RA: Zantaz File Enhancement 17 Feb 2012
+            if(isForCmtAttachment){
+                rfc2822Arch.For_Comment_with_File__c = true;
+                rfc2822Arch.ContentDocument_ID__c = feedCmt.RelatedRecordId;
+                string query2 = 'Select ContentUrl, FileType, PathOnClient, Title, Id From ContentVersion  where id= \'' + feedCmt.RelatedRecordId + '\' ';
+                List<ContentVersion> lstVer =  new List<ContentVersion>();
+                try{
+                    lstVer = Database.Query(query2);
+                }catch(Exception e){
+                    lstVer =  new List<ContentVersion>();
+                }
+                
+                if(lstVer.size() > 0){
+                    string mimetype= getMimeType(lstVer[0].PathOnClient);
+                    rfc2822Arch=  archiveBuilder.setRFCArchiveDocumentFields( rfc2822Arch, lstVer[0].PathOnClient , lstVer[0].Id, ChatterArchiveManager.getHostURL(),mimetype);
+                }
+            }
+            insert rfc2822Arch;
+            rfc2822Arch = getExistingRFC2822_Archive(rfc2822Arch.id );
+            rfc2822Arch.Message_ID__c = rfc2822Arch.Message_ID__c.replace('[objectID]', rfc2822Arch.Id);
+            update rfc2822Arch;
+            
+            /*
+            15 Feb 2012 Rahul A: For Archiving Chatter File Enhancement
+            TO DO: Create New RFC record for attached file of comments 
+            */
+            return rfc2822Arch;
+        }
+       //This method Updates the RFC2822_Archive__c in case of Comment updates
+          private   RFC2822_Archive__c update_RFC2822_Archive_For_Comments( RFC2822_Archive__c rfc2822Arch,FeedComment feedCmt,sObject rdmFeed , boolean forDelete,string ParentSobjectName){
+            //TO Field : Update the To Field
+            if(rfc2822Arch.To__c <> null && !(rfc2822Arch.To__c.indexOf( feedCmt.CreatedBy.email )>=0)){
+                rfc2822Arch.To__c = rfc2822Arch.To__c + ';' + '"' + feedCmt.CreatedBy.Lastname +  (feedCmt.CreatedBy.firstname <> null && feedCmt.CreatedBy.firstname <> '' ? ', ' + feedCmt.CreatedBy.firstname:'') + '" <' + feedCmt.CreatedBy.email + '>';
+            }
+            //Check if the Record is being updated due to deletion of a comment
+             String DeleteInfo = ChatterArchiveManager.getDeleteInfoSpanTag(forDelete);
+            //Create the div element for the comment update
+             String divChatterPost = getSingleChatterCommentDiv(feedCmt,DeleteInfo, false) ; //RA: Zantaz File Enhancement 17 Feb 2012
+             /*
+            15 Feb 2012 Rahul A: For Archiving Chatter File Enhancement
+            TO DO: Create a new RFC for attached file with comments 
+            */ 
+            //Create the Span Element for the post that the comment refers to            
+            String referenceSpan = getPostReferenceSpanTag(rdmFeed, false); //RA: Zantaz File Enhancement 17 Feb 2012
+            integer ind = rfc2822Arch.Body_Plain_Text__c.indexOf('<div id="' + rdmFeed.get('id') +'"');
+            if(ind < 0){
+                //The Post was not created today so we need to create the Div for Reference feed and add comment div top it
+                divChatterPost = getChatterPostCommentDiv( rdmFeed, feedCmt,  referenceSpan , DeleteInfo,ParentSobjectName, rfc2822Arch,false, false) ; 
+               // rfc2822Arch.Body_Plain_Text__c  = rfc2822Arch.Body_Plain_Text__c.replace('&nbsp;&nbsp;', divChatterPost +'&nbsp;&nbsp;');
+                 boolean isAppended  = checkLengthAndAppend( rfc2822Arch,  '&nbsp;&nbsp;',  divChatterPost +'&nbsp;&nbsp;');
+                         if(!isAppended){
+                            Integer index = rfc2822Arch.Index__c.intValue();
+                            rfc2822Arch = new RFC2822_Archive__c();
+                            //RA: Zantaz File Enhancement 17 Feb 2012
+                            return create_RFC2822_Archive_For_Comments(   rfc2822Arch, feedCmt, rdmFeed,  forDelete, ParentSobjectName,index+1, false,false, false);
+                         }
+            }else{
+                ind = rfc2822Arch.Body_Plain_Text__c.indexOf('<div id="' + feedCmt.id +'"');  
+                system.debug('______RA_forDelete_____ : '+ forDelete +  '  ___ index_____: '+ind);      
+                if(forDelete && ind > 0){
+                        integer ind2 = rfc2822Arch.Body_Plain_Text__c.indexOf('\n',ind);
+                        String subString  = rfc2822Arch.Body_Plain_Text__c.subString(ind,ind2 +1 );
+                        String subString2   = subString + DeleteInfo;
+                       // rfc2822Arch.Body_Plain_Text__c = rfc2822Arch.Body_Plain_Text__c.replace(subString,subString2);
+                         boolean isAppended  = checkLengthAndAppend( rfc2822Arch,  subString,  subString2);
+                         if(!isAppended){
+                            Integer index = rfc2822Arch.Index__c.intValue();
+                            rfc2822Arch = new RFC2822_Archive__c();
+                            //RA: Zantaz File Enhancement 17 Feb 2012
+                            return create_RFC2822_Archive_For_Comments(    rfc2822Arch, feedCmt, rdmFeed , forDelete, ParentSobjectName,index+1, false,false, false);
+                         }
+                }else{
+                     ind = rfc2822Arch.Body_Plain_Text__c.indexOf('<div id="' + rdmFeed.id +'"');
+                    integer ind2 = rfc2822Arch.Body_Plain_Text__c.indexOf('&nbsp;',ind);
+                    String subString  = rfc2822Arch.Body_Plain_Text__c.subString(ind,ind2);
+                    String subString2   = subString + divChatterPost;
+                   //rfc2822Arch.Body_Plain_Text__c = rfc2822Arch.Body_Plain_Text__c.replace(subString,subString2);
+                     boolean isAppended  = checkLengthAndAppend( rfc2822Arch,  subString,  subString2);
+                     if(!isAppended){
+                        Integer index = rfc2822Arch.Index__c.intValue();
+                        rfc2822Arch = new RFC2822_Archive__c();
+                        //RA: Zantaz File Enhancement 17 Feb 2012
+                        return create_RFC2822_Archive_For_Comments( rfc2822Arch, feedCmt, rdmFeed ,  forDelete, ParentSobjectName,index+1,false,false, false);
+                     }
+                }
+            }
+            EncodeData(rfc2822Arch);
+            rfc2822Arch.Archive_Status__c = STATUS_READY;
+            update rfc2822Arch;
+            return rfc2822Arch;
+        }
+        public static boolean checkLengthAndAppend(RFC2822_Archive__c rfc2822Arch, string subString, string subString2){
+            System.debug('_____________Inside checkLengthAndAppend_____ ');
+            if(checkLength( rfc2822Arch, subString2)){
+                 rfc2822Arch.Body_Plain_Text__c = rfc2822Arch.Body_Plain_Text__c.replace(subString,subString2);
+                  EncodeData(rfc2822Arch);
+                  System.debug('_____________Inside checkLengthAndAppend --subString__' + subString);
+                  System.debug('_____________Inside checkLengthAndAppend --subString2__' +   subString2);
+                  System.debug('_____________Inside checkLengthAndAppend_____ return true');
+                  return true;
+            }else{
+                System.debug('_____________Inside checkLengthAndAppend_____ return false');
+                return false;  
+            }
+        }
+        private static boolean checkLength( RFC2822_Archive__c rfc2822Arch, string string2){
+            Integer fieldLength = RFC2822_Archive__c.Body__c.getDescribe().getLength();
+            if(Test.isRunningTest()){
+                fieldLength= 1000;
+            }
+            System.debug('_____________Inside checkLength ____________________ ' + fieldLength);
+            String orgText = rfc2822Arch.Body_Plain_Text__c;
+              if(rfc2822Arch.Content_Transfer_Encoding__c == 'base64'  ){
+                   orgText = base64Encode(rfc2822Arch.Body_Plain_Text__c);
+                   string2 = base64Encode(string2);
+                }
+             Integer len = orgText.length() + string2.length();     
+             if( len > fieldLength )    {
+                System.debug('_____________Inside checkLength ____________________ return false');
+                return false;
+            }
+                System.debug('_____________Inside checkLength ____________________ return true');
+            return true;
+        }
+       //This method extracts the ContentDocuments related to the object
+        public static ContentVersion getContentDocument(string DocumentId){
+           // string query = 'Select c.Title, c.Id From ContentDocument c where id= \'' + DocumentId + '\' ';
+            string query2 = 'Select ContentUrl, FileType, PathOnClient, Title, Id From ContentVersion  where ContentDocumentid= \'' + DocumentId + '\' and IsLatest=true ';
+            // List<ContentDocument> lstDocuments =  new List<ContentDocument>();
+               List<ContentVersion> lstVer =  new List<ContentVersion>();
+            try{
+                // lstDocuments = Database.Query(query);
+                 lstVer = Database.Query(query2);
+                 
+            }catch(Exception e){
+                //lstDocuments =  new List<ContentDocument>();
+                lstVer =  new List<ContentVersion>();
+            }
+            if (lstVer.size()>0){
+                //return lstDocuments[0];
+                return lstVer[0];
+            }
+            return null;
+        }
+     // This Method Generates the RFC2822_Archive for a Status Updates on User
+    public void ArchiveChatterStatusUpdate(Map<id,sObject> mapUser, boolean forDelete,string ParentSobjectName){
+        Chatter_Settings__c dSwitch2 = Chatter_Settings__c.getInstance('Default');
+        if(!dSwitch2.Enable_Archiving__c) {
+            return;
+        }
+           
+            Set<Id> newUserIds = mapUser.keySet();
+            //Retrieve the Feeds for the  parent object 
+            //List<Sobject> rdmFeedList = getUserStatusFeeds( newUserIds,ParentSobjectName);
+            List<Sobject> rdmFeedList = ChatterArchiveManager.getFeeds(newUserIds, ParentSobjectName, true,this.archiveBuilder);
+              if(rdmFeedList.size()>0){
+                    ArchiveToRFC2822( rdmFeedList, forDelete, ParentSobjectName);
+              }
+    }
+    /**
+     *  This future method was created to handle Tracked changes Feed.
+     *  This method is called from the After update triggers on objects
+     *  We need to make this a future method because, the tracked cchanged feed are created after the update changes are committed. i.e. after the Trigger complete execution.
+     */
+    
+    @future
+    public static void ArchiveFeedTracking_future(string objectId , boolean forDelete,string ParentSobjectName){
+        // 11/15/2011 Manisha Gupta : stored object id in a public variable 'objId' to query the record.
+        system.debug('Trigger Step: In Chattermanager Class in future method ');
+        objId = objectId ;
+        Chatter_Settings__c dSwitch2 = Chatter_Settings__c.getInstance('Default');
+        if(!dSwitch2.Enable_Archiving__c) {
+            return;
+        }
+        String query = 'Select id from ' + ParentSobjectName + ' where id =\'' + objectId + '\'';
+        List<SObject> lstObj = Database.query(query);
+        if(lstObj.size() > 0){
+            Map<id,sObject> mapObj = new Map<id,sObject>(); 
+            mapObj.put((Id)lstObj[0].get('Id'),lstObj[0]);
+            ChatterArchiveManager manager = new ChatterArchiveManager(new ChatterArchiveBuilder.GeneralArchiveBuilder());
+            manager.ArchiveChatterStatusUpdate(mapObj,forDelete,ParentSobjectName);
+        }
+    }
+    
+    
+      @future
+    public static void ArchiveFeedTracking_Insert_future(string objectId , boolean forDelete,string ParentSobjectName){
+        // 11/15/2011 Manisha Gupta : stored object id in a public variable 'objId' to query the record.
+        objId = objectId ;
+        st_forInsert = true;
+        Chatter_Settings__c dSwitch2 = Chatter_Settings__c.getInstance('Default');
+        if(!dSwitch2.Enable_Archiving__c) {
+            return;
+        }
+        String query = 'Select id from ' + ParentSobjectName + ' where id =\'' + objectId + '\'';
+        List<SObject> lstObj = Database.query(query);
+        if(lstObj.size() > 0){
+            Map<id,sObject> mapObj = new Map<id,sObject>(); 
+            mapObj.put((Id)lstObj[0].get('Id'),lstObj[0]);
+            ChatterArchiveManager manager = new ChatterArchiveManager(new ChatterArchiveBuilder.GeneralArchiveBuilder());
+            manager.ArchiveChatterStatusUpdate(mapObj,forDelete,ParentSobjectName);
+        }
+    }
+    // 11/18/2011 Manisha Gupta : method to archive campaigns
+     @future
+    public static void ArchiveFeedTracking_Campaigns_future(string objectId , boolean forDelete,string ParentSobjectName,string newDescr,string oldDescr,string newSummr,string oldSummr){
+        
+        // 11/18/2011 Manisha Gupta
+        oldDesc = oldDescr ;
+        newDesc  = newDescr ;
+        oldSumm = oldSummr ;
+        newSumm = newSummr;
+        // 11/15/2011 Manisha Gupta : stored object id in a public variable 'objId' to query the record.
+        objId = objectId ;
+        
+        
+        Chatter_Settings__c dSwitch2 = Chatter_Settings__c.getInstance('Default');
+        if(!dSwitch2.Enable_Archiving__c) {
+            return;
+        }
+        String query = 'Select id from ' + ParentSobjectName + ' where id =\'' + objectId + '\'';
+        List<SObject> lstObj = Database.query(query);
+        if(lstObj.size() > 0){
+            Map<id,sObject> mapObj = new Map<id,sObject>(); 
+            mapObj.put((Id)lstObj[0].get('Id'),lstObj[0]);
+            ChatterArchiveManager manager = new ChatterArchiveManager(new ChatterArchiveBuilder.GeneralArchiveBuilder());
+            manager.ArchiveChatterStatusUpdate(mapObj,forDelete,ParentSobjectName);
+        }
+    }
+    
+     
+    public static void ArchiveFeedTracking_Delete(string objectId , boolean forDelete,string ParentSobjectName){
+        Chatter_Settings__c dSwitch2 = Chatter_Settings__c.getInstance('Default');
+        if(!dSwitch2.Enable_Archiving__c) {
+            return;
+        }
+        String query = 'Select id from ' + ParentSobjectName + ' where id =\'' + objectId + '\'';
+        List<SObject> lstObj = Database.query(query);
+        if(lstObj.size() > 0){
+            Map<id,sObject> mapObj = new Map<id,sObject>(); 
+            mapObj.put((Id)lstObj[0].get('Id'),lstObj[0]);
+            ChatterArchiveManager manager = new ChatterArchiveManager(new ChatterArchiveBuilder.GeneralArchiveBuilder());
+            manager.ArchiveChatterStatusUpdate(mapObj,forDelete,ParentSobjectName);
+        }
+    }
+   
+    @future
+    public static void ArchiveFeedTracking_ContentDoc_future(string objectId , boolean forDelete,string ParentSobjectName){
+        Chatter_Settings__c dSwitch2 = Chatter_Settings__c.getInstance('Default');
+        if(!dSwitch2.Enable_Archiving__c) {
+            return;
+        }
+        //Fetch ContentDocumentId
+        //ParentSobjectName = 'ContentVersion';
+        String query = 'Select id , ContentDocumentId from ' + ParentSobjectName + ' where id =\'' + objectId + '\'';
+        List<SObject> lstObj = Database.query(query); 
+        
+        ParentSobjectName = 'ContentDocument' ;
+        //fetch ContentDocument
+        query = 'Select id  from '+ ParentSobjectName +' where id =\'' + (Id)lstObj[0].get('ContentDocumentId') + '\'';
+        lstObj = Database.query(query);
+        if(lstObj.size() > 0){
+            Map<id,sObject> mapObj = new Map<id,sObject>();
+            mapObj.put((Id)lstObj[0].get('Id'),lstObj[0]);
+            ChatterArchiveManager manager = new ChatterArchiveManager(new ChatterArchiveBuilder.GeneralArchiveBuilder());
+            manager.ArchiveChatterStatusUpdate(mapObj,forDelete,ParentSobjectName);
+        }
+    }
+
+    /* Jira 4350 : Vipin Makhija :  Method added to create Archieve records for file version change as part of ChatterArchiveManager_Batch bach decommisioning */
+    
+    @future
+    public static void ArchiveFileVersionUpdate_Future(List<Id> objectIds , boolean forDelete,string ParentSobjectName){
+        Chatter_Settings__c dSwitch2 = Chatter_Settings__c.getInstance('Default');
+        if(!dSwitch2.Enable_Archiving__c) {
+            return;
+        }
+
+        List<Id> contentVersionIds = new List<Id>();
+        
+        //Query ContentDocument and passing the map to archive status update field 
+        ParentSobjectName = 'ContentDocument' ;
+        //fetch ContentDocument
+        String query = 'Select id , ParentId from '+ ParentSobjectName +' where id in: objectIds';
+                
+        Map<id,sObject> mapObj = new Map<id,sObject>( Database.query(query));
+        Map<String,String> mapGroupContentDoc = new Map<String,String>();
+        List<ContentVersion> lsCV = [select Id , FirstPublishLocationId  from ContentVersion where ContentDocumentId in : objectIds ];
+
+        for(SObject contentVar : lsCV){ 
+            
+            system.debug(contentVar.get('FirstPublishLocationId') + 'FirstPublish****');          
+            contentVersionIds.add((Id)contentVar.get('id'));
+        }
+        
+        List<RFC2822_Archive__c> updatedArchieveRec = new   List<RFC2822_Archive__c>();            
+        system.debug(mapObj + 'mapObj***');
+        if(mapObj != null ){
+            ChatterArchiveManager manager = new ChatterArchiveManager(new ChatterArchiveBuilder.GeneralArchiveBuilder());
+            
+            Set<Id> newObjIds = mapObj.keyset();
+            
+            List<Sobject> rdmFeedList = ChatterArchiveManager.getFeeds(newObjIds, ParentSobjectName, true,manager.archiveBuilder);
+              if(rdmFeedList.size()>0){
+                    manager.ArchiveToRFC2822( rdmFeedList, forDelete, ParentSobjectName);
+              }
+            
+            system.debug('InitialArchieveRecords***'); 
+            List<RFC2822_Archive__c>  oldArchieveRecords = new List<RFC2822_Archive__c>([select id , IsFileDeleted__c , GroupName__c , GroupType__c , SourceID__c,  To__c, Subject__c, Name,  Message_ID__c, MIME_Version__c,  IsDeleted, Index__c, From__c , Feed_Id__c, Content_Type__c, ContentDocument_ID__c, ContentDocumentType__c, ContentDocumentTitle__c,ContentDocumentName__c, ContentDocumentLink__c, Body__c, Body_Plain_Text__c, Archive_Status__c, Archive_Date__c, FeedObjectName__c from RFC2822_Archive__c where ContentDocument_ID__c in : contentVersionIds]);                       
+            system.debug(oldArchieveRecords + 'oldArchieveRecords***'); 
+            
+            String GroupName ;
+            String bodyText ;
+                        
+            for(RFC2822_Archive__c oldVar : oldArchieveRecords){
+                
+                if(oldVar.GroupName__c != null && oldVar.ContentDocument_ID__c != null && oldVar.FeedObjectName__c == 'CollaborationGroupFeed'){
+                    
+                    GroupName = oldVar.GroupName__c;
+                    
+                }               
+                            
+            }
+            
+            for(RFC2822_Archive__c oldVar : oldArchieveRecords){
+                
+                if((oldVar.GroupName__c == null ||  oldVar.GroupName__c == '') && oldVar.ContentDocument_ID__c != null  && GroupName != null){
+                    oldVar.GroupName__c = GroupName;
+                    bodyText =  oldVar.Body_Plain_Text__c ;
+                    
+                    String groupBody = '  <div id="groupName">Group Name: '+ GroupName + '</div>\n' + '<div id="primaryMaterial">' ;
+                    bodyText = bodyText.replace('<div id="primaryMaterial">', groupBody);
+                    
+                    oldVar.Body_Plain_Text__c = bodyText ;
+                    updatedArchieveRec.add(oldVar);
+                }
+            }                      
+        }
+        
+        if(!updatedArchieveRec.isempty()){
+        
+            update updatedArchieveRec;
+        }
+        
+        
+        
+    }
+
+   /* Jira 4350 : Vipin Makhija :  Method added to create Archieve records for file deletion as part of ChatterArchiveManager_Batch bach decommisioning */    
+    @future
+    public static void ArchiveFileVersionDelete_Future(List<Id> objectIds , boolean forDelete,string SObjectTypeName,Set<Id> contentVersionIds ){
+
+        Chatter_Settings__c dSwitch2 = Chatter_Settings__c.getInstance('Default');
+        if(!dSwitch2.Enable_Archiving__c) {
+            return;
+        }
+
+        //Fetching the list of archive records by using contentVersion Ids
+        MAP<string, RFC2822_Archive__c> mapOfCD_Ids = new MAP<string, RFC2822_Archive__c>();
+         
+        List<RFC2822_Archive__c>  oldArchieveRecords = new List<RFC2822_Archive__c>([select id , GroupType__c , GroupName__c , GroupInformation__c , GroupDescription__c , IsFileDeleted__c , SourceID__c,  To__c, Subject__c, Name,  Message_ID__c, MIME_Version__c,  IsDeleted, Index__c, From__c , Feed_Id__c, Content_Type__c, ContentDocument_ID__c, ContentDocumentType__c, ContentDocumentTitle__c,ContentDocumentName__c, ContentDocumentLink__c, Body__c, Body_Plain_Text__c, Archive_Status__c, Archive_Date__c, FeedObjectName__c from RFC2822_Archive__c where ContentDocument_ID__c in : contentVersionIds]);
+        List<RFC2822_Archive__c>  toUpdateArchieveRecords = new List<RFC2822_Archive__c>(); 
+        
+        //Passing the list of old Archieve Records map to Archive Feed tracking method        
+        for (RFC2822_Archive__c archieveRec : oldArchieveRecords) {
+        
+            if(!archieveRec.IsFileDeleted__c) {
+            
+                mapOfCD_Ids.put(archieveRec.ContentDocument_ID__c ,archieveRec ); 
+            }
+            
+        }
+        
+
+     
+        
+        ChatterArchiveManager_Batch.ArchiveFeedTracking_ContentDoc_Delete_Batch(mapOfCD_Ids);
+        
+        
+             
+     
+    }    
+    public static string getMimeType(string filename){
+        string fileext ='';
+        string fileType = 'UNKNOWN';
+        if(filename.contains('.')) {
+            fileext =  filename.substring(filename.lastIndexof('.')+1,filename.length());
+            fileext=fileext.toLowerCase();
+            if(ChatterArchivemanager.Map_FileExtensions_Mime.containskey(fileext)){
+                fileType= ChatterArchivemanager.Map_FileExtensions_Mime.get(fileext);
+            }
+            
+        }
+        return fileType;
+        
+        
+    }
+    public Static Map<string,string> Map_FileExtensions_Mime = new Map<string,string>{
+                                                                                'txt'=>'text/plain',
+                                                                                'jpg'=>'image/jpeg',
+                                                                                'doc'=>'application/msword',
+                                                                                'docx'=>'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                                                                                'dot' => 'application/msword',
+                                                                                 'dotx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.template',
+                                                                                 'docm' => 'application/vnd.ms-word.document.macroEnabled.12',
+                                                                                 'dotm' => 'application/vnd.ms-word.template.macroEnabled.12',
+                                                                                 'rtf' => 'application/rtf',
+                                                                                 'bmp' => 'image/bmp',
+                                                                                'csv'=>'text/csv',
+                                                                                'png'=>'image/png',
+                                                                                'pdf'=>'application/pdf',
+                                                                                'diff'=>'binary/file',
+                                                                                'xml' => 'text/xml',
+                                                                                'htm' => 'text/html',
+                                                                                'html' => 'text/html',
+                                                                                'css' => 'text/css',
+                                                                                 'gif'=>'image/gif',
+                                                                                 'wav' =>'audio/vnd.wave',
+                                                                                 'wmv' => 'audio/x-ms-wma',
+                                                                                 'mpeg' => 'audio/mpeg',
+                                                                                 'mp3' => 'audio/mpeg',
+                                                                                 'zip' => 'application/zip',
+                                                                                 'gz' => 'application/x-gzip',
+                                                                                 'odt' => 'application/vnd.oasis.opendocument.text',
+                                                                                 'odp' => 'application/vnd.oasis.opendocument.presentation',
+                                                                                 'ods' => 'application/vnd.oasis.opendocument.spreadsheet',
+                                                                                 'odg' =>'application/vnd.oasis.opendocument.graphics',
+                                                                                 'odg' =>'application/vnd.oasis.opendocument.graphics',
+                                                                                 'xls'=>'application/vnd.ms-excel',
+                                                                                 'xlsx'=>'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                                                                 'xlsm'=>'application/vnd.ms-excel.sheet.macroEnabled.12',
+                                                                                 'xlsb'=>'application/vnd.ms-excel.sheet.binary.macroEnabled.12',
+                                                                                 'ppt'=>'application/vnd.ms-powerpoint',
+                                                                                 'pptx'=>'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                                                                                 'pps'=>'application/vnd.ms-powerpoint',
+                                                                                 'ppsx'=>'application/vnd.openxmlformats-officedocument.presentationml.slideshow',
+                                                                                 'rar' => 'application/x-rar-compressed',
+                                                                                 'tar' =>'application/x-tar'
+                                                                 
+                                                                    };
+    @future
+    public static void   postFeed_future(  ID feedItmId,string parentObjectId,String feedBody, String postType){
+          
+        FeedItem  newFeedPost = new FeedItem(ParentId = parentObjectId, Body = feedBody, type=postType); 
+         
+        insert newFeedPost;
+        FeedItem  oldFeedPost = new FeedItem(Id=feedItmId);
+        delete oldFeedPost;
+        
+    } 
+    /*public void UpdateContentVersionFields(sObject feed){
+        System.Debug('---------------- (string)feed.get(RelatedRecordId) -----'+ (string)feed.get('RelatedRecordId')  );
+        List<ContentVersion> lstver = Database.query('Select Id,VersionNumber,ContentDocumentId,Origin from ContentVersion where Id=\'' + (string)feed.get('RelatedRecordId') + '\'');
+         if(lstver.size()== 0){
+            System.Debug('---------------- Create Version' );
+            FeedItem feedContent = [Select ContentData,ContentSize from FeedItem where id =:feedItm.Id];
+            ContentVersion ver = new ContentVersion();
+            ver.ContentDocumentId  = feedItm.RelatedRecordId;
+            ver.Title = feedItm.Title;
+            ver.VersionData = feedContent.ContentData;
+            ver.FullFileName__c = feedItm.ContentFileName;
+            ver.MimeType__c = feedItm.ContentType;
+            insert ver;
+         }else{
+            System.Debug('---------------- Update Version-----'+ lstver );
+            ContentVersion ver = lstver[0];
+            if(ver.Origin =='C'){
+                ver.FullFileName__c = (string)feed.get('ContentFileName');
+                ver.MimeType__c = (string)feed.get('ContentType');
+                
+                update ver;
+            }
+         }
+    }*/
+    
+    
+    private void CreateRFCArchiveForCommentAttachment(sObject rdmFeed, string ParentSobjectName, FeedComment currentFeedCommentDetails){
+        RFC2822_Archive__c rfc2822Arch = new RFC2822_Archive__c();
+        rfc2822Arch = create_RFC2822_Archive_For_Comments(rfc2822Arch,currentFeedCommentDetails, rdmFeed, false, ParentSobjectName, 0, true, false, true);
+        
+    }
+    
+    
+}
