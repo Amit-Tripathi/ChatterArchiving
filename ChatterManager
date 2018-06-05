@@ -1,0 +1,165 @@
+//This class Manages Chatter Feed Posts and comments
+// 21 JUL 2010     Dan Arrigan      Added function getUserSubmittedFeedSize() to returns a count of the Chatter Posts submitted by a User (not automatically added)
+// 26 Jul 2010     Chetan Garg      Added function getFeedCounts(Set<Id>) to return map for FeedCounts                                    
+// 29 JUL 2010     Dan Arrigan      Modified the From__c setting to include angle brackets < > as well as a space after the comma (ILM formatting requirements)
+// 08 AUG 2010     Dan Arrigan      Added "PostID:  " prefix prior to the ResearchDoc id to the Summary for ChatterDiscovery.  
+//  20-9-2010 	   Parth Tamhaney:  Made changes in various places to First fetch list and then loop over it
+// 22 Mar 2011	   Parth Tamhaney:  Removed Unused Code and Use of Focus_Call__c         
+
+public with sharing class ChatterManager {
+    //public static String MESSAGE_HOST_ADDRESS = getHostIP();// '@cs3.salesforce.com';
+    
+    /*static string getHostIP(){
+    	
+    	PageReference pg = ApexPages.currentPage();
+    	
+    	if(pg <> null){
+	        string Host = pg.getHeaders().get('Host');
+	        //system.debug('______________ ApexPages.currentPage() _____________________' + string.valueOf(pg.getContent()).substring(0,10));
+	        system.debug('______________ Host  _____________________' +  Host);
+	        system.debug('______________ Host  _____________________' +   Host.split('\\.'));
+	        //String[] arrUrl = url.split('/');
+	        String[] arrUrl = Host.split('\\.');
+	        return  '@' + arrUrl.get(1) +'.salesforce.com' ;
+    	}else{
+    		
+    		 return System.Label.HostName;//'@cs3.salesforce.com';
+    	}
+        //https://c.cs3.visual.force.com/
+    }*/
+    
+    
+    //This method takes the object Feed Name and parentObjectId and all Feed Posts 
+    //Returns  List<Sobject>
+    public static List<Sobject> getFeeds(String feedObjectName,string parentObjectId){
+        system.debug('#parentObjectId-->'+parentObjectId);
+        List<Sobject> feedSobjectList = new List<Sobject>();
+        Set<string> setTypes = new Set<string>{'ContentPost','TextPost'};
+        
+        String query ='SELECT Id, Type, CreatedBy.FirstName, CreatedBy.LastName, CreatedBy.Name,ParentId, Parent.Name,FeedPost.Id,FeedPostId,  ' +
+                        ' FeedPost.Type, FeedPost.Body, FeedPost.Title,CreatedDate, FeedPost.ParentId,' +
+                        ' (SELECT Id, CommentBody, CreatedDate, CreatedById,CreatedBy.Name, CreatedBy.LastName  ' +
+                            'FROM FeedComments ORDER BY CreatedDate Asc LIMIT 4)  ' +
+                    ' FROM ' + feedObjectName + 
+                    ' where ParentId = :parentObjectId and FeedPost.Type in :setTypes and CreatedById != null  ' +
+                    ' Order BY CreatedDate desc ' ;
+        
+        feedSobjectList = Database.query(query);
+        
+        return feedSobjectList;
+        
+    }
+    
+    
+  
+ 
+    
+    //This method takes the parentObjectIds 
+    //Returns  Map<String,Integer>
+    public static Map<String,Integer> getFeedCounts(String feedObjectName,Set<Id> parentObjectIds){
+        system.debug('#parentObjectId-->'+parentObjectIds);
+        Map<String,Integer> mapResearchFeedCount = new Map<String,Integer>();  
+        Set<string> setTypes = new Set<string>{'ContentPost','TextPost'};
+        
+         String query ='Select ParentId, Count(Id) feedCount   ' +
+                    ' FROM ' + feedObjectName + 
+                    '  Where ParentId in : parentObjectIds ' +
+                             ' and FeedPost.Type in :setTypes ' +
+                     ' group by ParentId ' ;
+     
+     //20-9-2010 ParthT: First fetch list and then loop over it
+     List<AggregateResult> lstAggr =        Database.query(query);    
+        for(AggregateResult res : lstAggr){
+                mapResearchFeedCount.put( (String)(res.get('ParentId')),
+                                          (Integer)(res.get('feedCount')));
+         }
+       /* for(AggregateResult res : [Select ParentId, Count(Id) feedCount  from Research_Document_Metadata__Feed r
+                                   Where ParentId in : parentObjectIds
+                                       and FeedPost.Type in :setTypes
+                                   group by ParentId]){
+                mapResearchFeedCount.put( (String)(res.get('ParentId')),
+                                          (Integer)(res.get('feedCount')));
+         }*/
+        
+        return mapResearchFeedCount;
+        
+    }
+    
+    
+    
+    
+    //This method takes the object Feed Id and returns the Object Feed Details
+    //Returns  List<Sobject>
+    public static List<Sobject> getFeed(String feedObjectName,string feedId){
+        system.debug('#feedId-->'+feedId);
+        List<Sobject> feedSobjectList = new List<Sobject>();
+        
+        String query ='SELECT Id, Type, CreatedBy.FirstName, CreatedBy.LastName, CreatedBy.Name,CreatedBy.email, ParentId, Parent.Name,FeedPost.Id,FeedPostId , ' +
+                        ' FeedPost.Type, FeedPost.Body, FeedPost.Title,CreatedDate,FeedPost.ParentId, ' +
+                        ' (SELECT Id, CommentBody, CreatedDate, CreatedById,CreatedBy.Name, CreatedBy.LastName ,CreatedBy.email ' +
+                            'FROM FeedComments ORDER BY CreatedDate Asc LIMIT 4)  ' +
+                    ' FROM ' + feedObjectName + 
+                    ' where Id = :feedId   ' ;
+        
+        feedSobjectList = Database.query(query);
+        
+        return feedSobjectList;
+        
+    }
+    
+    //This Method Takes Parent object id, feed body  and focus callId as arguments and saves a feed Post    
+   public static void postFeed(string parentObjectId,String feedBody){
+        System.debug('_______________________ parentObjectId  _________________________' + parentObjectId);
+        if(feedBody != null && feedBody.length() > 1000){
+          feedBody = feedBody.substring(0, 999); 
+        }
+          
+        FeedPost newFeedPost = new FeedPost(ParentId = parentObjectId,Body = feedBody );
+         insert newFeedPost;
+        
+        
+    }
+   
+    
+    //This method Deletes a Feed Comment
+    public static void deletePostComment(String feedId ){
+        FeedComment comment = new FeedComment(id=feedId);
+        delete comment;
+        
+    }
+    
+    
+   public static void postFeedComment( String feedId, String feedCommentText ){
+    	 FeedComment fc = new FeedComment();
+            fc.FeedItemId = feedId;
+            fc.CommentBody = feedCommentText;
+        insert fc;
+       
+        
+    }
+   
+    
+    public static Integer getUserSubmittedFeedSize(String feedObjectName,string parentObjectId){
+        // Returns a count of the Chatter Posts submitted by a User (not automatically added)
+        try { 
+          List<Sobject> feedSobjectList = new List<Sobject>();
+          feedSobjectList = ChatterManager.getFeeds(feedObjectName, parentObjectId);
+          
+          List<Research_Document_Metadata__Feed> feedList = new List<Research_Document_Metadata__Feed>();
+          feedList.addAll((List<Research_Document_Metadata__Feed>)feedSobjectList) ;
+                          
+          return feedList.size();  
+      } catch(Exception e) { 
+        system.debug('______________ Error: getUserSubmittedFeedSize  _________________' + e );
+              return 0; 
+            }
+    } // end function getFeedSize
+    
+    
+    
+ 
+	    
+	    
+   
+
+}
